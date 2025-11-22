@@ -1,0 +1,27 @@
+.draggable-icon {
+  -webkit-app-region: drag;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: grab;
+}
+
+.draggable-icon:active {
+  cursor: grabbing;
+}
+
+.logo {
+  height: 80px;
+  width: 80px;
+  will-change: filter;
+  transition: filter 300ms;
+  /* Prevent drag on the image itself so the div handles it, 
+     or allow it if -webkit-app-region is on the container */
+  -webkit-user-drag: none;
+}
+
+.logo:hover {
+  filter: drop-shadow(0 0 2em #646cffaa);
+}
