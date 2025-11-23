@@ -203,6 +203,7 @@ Based on the current screenshot, what is the NEXT action to take?"""
             print(f"Response: {response_text}")
             raise
     
+<<<<<<< HEAD
     def _find_click_position(self, target_description: str, max_attempts: int = 5) -> tuple:
         """
         Iteratively find the right position to click using visual feedback.
@@ -336,6 +337,8 @@ If the cursor is NOT on target, you MUST provide new x,y coordinates that differ
         print(f"   Using final position: ({final_x}, {final_y})")
         return final_x, final_y
     
+=======
+>>>>>>> main
     def execute_action(self, action_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute a single action.
@@ -363,6 +366,7 @@ If the cursor is NOT on target, you MUST provide new x,y coordinates that differ
             }
         
         try:
+<<<<<<< HEAD
             # Special handling for click and move_mouse - use iterative positioning
             if action_name == "click" and params.get('x') is not None and params.get('y') is not None:
                 print(f"   🔍 Using iterative cursor placement...")
@@ -390,6 +394,8 @@ If the cursor is NOT on target, you MUST provide new x,y coordinates that differ
                 params['x'] = x
                 params['y'] = y
             
+=======
+>>>>>>> main
             # Get the action method
             if not hasattr(self.actions, action_name):
                 raise ValueError(f"Unknown action: {action_name}")
