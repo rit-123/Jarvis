@@ -17,7 +17,7 @@ from anthropic import Anthropic
 import pyautogui
 from actions import ComputerActions, get_action_descriptions
 from grounding import GroundingModel, SmartActions
-
+import os
 
 class StepAgent:
     """
@@ -133,13 +133,17 @@ CRITICAL: Your entire response must be a single JSON object. No text before or a
         """
         # Build context about what's been done
         if self.history:
-            last_action = self.history[-1]
-            context = f"Last action: {last_action['action']}({last_action['params']}) - {last_action['status']}"
+            # Build a summary of completed actions
+            history_summary = "ACTIONS COMPLETED SO FAR:\n"
+            for i, h in enumerate(self.history, 1):
+                status_str = "✓" if h['status'] == 'success' else "✗"
+                history_summary += f"{i}. [{status_str}] {h['action']}({h.get('params', {})}) - {h.get('reasoning', '')}\n"
             
-            if len(self.history) > 1:
-                context += f"\n\nAll previous actions:\n"
-                for i, h in enumerate(self.history, 1):
-                    context += f"{i}. {h['action']}({h['params']}) - {h['status']}\n"
+            history_summary += "\nDO NOT repeat these actions. Continue from where you left off.\n"
+            
+            last_action = self.history[-1]
+            context = f"\nLast action: {last_action['action']}({last_action['params']}) - {last_action['status']}\n"
+            context = history_summary + context
         else:
             context = "No actions taken yet. This is the first action."
         
@@ -151,7 +155,13 @@ CRITICAL: Your entire response must be a single JSON object. No text before or a
 
 {context}
 
-Based on the current screenshot, what is the NEXT action to take?"""
+Based on the current screenshot and what's been done so far, what is the NEXT action to take?
+
+IMPORTANT: 
+- Look at the completed actions above
+- Do NOT repeat actions that already succeeded
+- Continue from where you left off
+- If the goal is complete, return {{"action": "done"}}"""
         
         # Call Claude
         print("🤔 Asking Claude for next action...")
@@ -362,34 +372,22 @@ If the cursor is NOT on target, you MUST provide new x,y coordinates that differ
                 "reasoning": reasoning
             }
         
-        try:
-            # Special handling for click and move_mouse - use iterative positioning
-            if action_name == "click" and params.get('x') is not None and params.get('y') is not None:
-                print(f"   🔍 Using iterative cursor placement...")
-                
-                # Extract target description from reasoning or use generic
-                target = reasoning if reasoning else "the target element"
-                
-                # Find the right position iteratively
-                x, y = self._find_click_position(target, max_attempts=4)
-                
-                # Update params with refined coordinates
-                params['x'] = x
-                params['y'] = y
-                
-            elif action_name == "move_mouse":
-                print(f"   🔍 Using iterative cursor placement...")
-                
-                # Extract target description
-                target = reasoning if reasoning else "the target position"
-                
-                # Find position
-                x, y = self._find_click_position(target, max_attempts=4)
-                
-                # Update params
-                params['x'] = x
-                params['y'] = y
+        # Check if this is a coordinate-based action - if so, HANDOFF
+        coordinate_actions = ["click", "move_mouse", "drag", "scroll"]
+        if action_name in coordinate_actions:
+            print(f"\n🔄 HANDOFF REQUIRED!")
+            print(f"   This action requires coordinates: {action_name}")
+            print(f"   Terminating and passing to grounding system...")
             
+            return {
+                "action": action_name,
+                "params": params,
+                "reasoning": reasoning,
+                "status": "handoff",
+                "handoff_reason": "coordinate_based_action"
+            }
+        
+        try:
             # Get the action method
             if not hasattr(self.actions, action_name):
                 raise ValueError(f"Unknown action: {action_name}")
@@ -419,22 +417,23 @@ If the cursor is NOT on target, you MUST provide new x,y coordinates that differ
                 "status": "failed"
             }
     
-    def run(self, goal: str, max_steps: int = 20) -> list:
+    def run(self, goal: str, max_steps: int = 20) -> Dict[str, Any]:
         """
-        Run the agent step-by-step until done.
+        Run the agent step-by-step until done or handoff needed.
         
         Args:
             goal: Goal to accomplish
             max_steps: Maximum number of steps before stopping
             
         Returns:
-            List of all actions taken
+            Dictionary with status and history
         """
         print("=" * 60)
         print(f"🎯 GOAL: {goal}")
         print("=" * 60)
         
         self.history = []
+        handoff_info = None
         
         for step in range(1, max_steps + 1):
             print(f"\n{'='*60}")
@@ -472,6 +471,22 @@ If the cursor is NOT on target, you MUST provide new x,y coordinates that differ
             result = self.execute_action(action_dict)
             self.history.append(result)
             
+            # Check if we need to handoff
+            if result['status'] == 'handoff':
+                handoff_info = {
+                    "action": result['action'],
+                    "params": result['params'],
+                    "reasoning": result['reasoning'],
+                    "goal": goal,
+                    "history": self.history
+                }
+                print("\n" + "=" * 60)
+                print("🔄 HANDOFF TO GROUNDING SYSTEM")
+                print("=" * 60)
+                print(f"Action needed: {result['action']}")
+                print(f"Description: {result['reasoning']}")
+                break
+            
             # Check if done
             if result['action'] == 'done':
                 print("\n" + "=" * 60)
@@ -494,54 +509,108 @@ If the cursor is NOT on target, you MUST provide new x,y coordinates that differ
         successes = sum(1 for h in self.history if h['status'] == 'success')
         print(f"   Successful: {successes}/{len(self.history)}")
         
-        return self.history
-
-
-if __name__ == "__main__":
-    import os
-    
-    # Get API keys
-    anthropic_key = os.environ.get('ANTHROPIC_API_KEY')
-    hf_token = os.environ.get('HF_TOKEN')
-    
-    if not anthropic_key:
-        print("Error: Set ANTHROPIC_API_KEY environment variable")
-        exit(1)
-    
-    # Decide if we want grounding
-    use_grounding = input("Use grounding model? (y/n): ").strip().lower() == 'y'
-    
-    grounding = None
-    if use_grounding:
-        if not hf_token:
-            print("Error: Set HF_TOKEN environment variable")
-            exit(1)
+        if handoff_info:
+            print(f"   Status: HANDOFF")
         
-        print("\n🔧 Setting up grounding model...")
-        grounding = GroundingModel(
-            endpoint_url="https://k0mkv3j05m8vnmea.us-east-1.aws.endpoints.huggingface.cloud",
-            hf_token=hf_token
-        )
+        return {
+            "status": "handoff" if handoff_info else ("complete" if any(h['action'] == 'done' for h in self.history) else "incomplete"),
+            "goal": goal,
+            "history": self.history,
+            "handoff": handoff_info
+        }
+
+
+def run_agent(instruction: str, anthropic_api_key: str = None) -> Dict[str, Any]:
+    """
+    Run the agent with a single instruction.
     
-    # Create agent
+    Args:
+        instruction: What the user wants to do
+        anthropic_api_key: Anthropic API key (optional, will use env var if not provided)
+        
+    Returns:
+        Result dictionary with status, history, and handoff info
+        
+    Example:
+        result = run_agent("open google docs and create a new document")
+        if result['status'] == 'handoff':
+            print(f"Need to: {result['handoff']['action']}")
+    """
+    # Get API key
+    if anthropic_api_key is None:
+        anthropic_api_key = os.environ.get('ANTHROPIC_API_KEY')
+        if not anthropic_api_key:
+            raise ValueError("ANTHROPIC_API_KEY required")
+    
+    # Create agent WITHOUT grounding model
     agent = StepAgent(
-        anthropic_api_key=anthropic_key,
-        grounding_model=grounding
+        anthropic_api_key=anthropic_api_key,
+        grounding_model=None  # No grounding
     )
     
-    # Get goal
-    print("\n" + "=" * 60)
-    print("STEP-BY-STEP AUTOMATION AGENT")
-    print("=" * 60)
+    # Run the instruction
+    result = agent.run(instruction, max_steps=15)
     
-    goal = input("\n🎯 What would you like to do? ").strip()
+    return result
+
+# run_agent("open chrome and then go to wikiepdia.org, then go to my terminal and list all files")
+
+# if __name__ == "__main__":
+#     import os
     
-    if goal:
-        history = agent.run(goal, max_steps=15)
+#     # Get API keys
+#     anthropic_key = os.environ.get('ANTHROPIC_API_KEY')
+#     hf_token = os.environ.get('HF_TOKEN')
+    
+#     if not anthropic_key:
+#         print("Error: Set ANTHROPIC_API_KEY environment variable")
+#         exit(1)
+    
+#     # Decide if we want grounding
+#     use_grounding = input("Use grounding model? (y/n): ").strip().lower() == 'y'
+    
+#     grounding = None
+#     if use_grounding:
+#         if not hf_token:
+#             print("Error: Set HF_TOKEN environment variable")
+#             exit(1)
         
-        print("\n" + "=" * 60)
-        print("📋 ACTION HISTORY:")
-        print("=" * 60)
-        for i, h in enumerate(history, 1):
-            status_icon = "✅" if h['status'] == 'success' else "❌"
-            print(f"{i}. {status_icon} {h['action']}({h['params']})")
+#         print("\n🔧 Setting up grounding model...")
+#         grounding = GroundingModel(
+#             endpoint_url="https://k0mkv3j05m8vnmea.us-east-1.aws.endpoints.huggingface.cloud",
+#             hf_token=hf_token
+#         )
+    
+#     # Create agent
+#     agent = StepAgent(
+#         anthropic_api_key=anthropic_key,
+#         grounding_model=grounding
+#     )
+    
+#     # Get goal
+#     print("\n" + "=" * 60)
+#     print("STEP-BY-STEP AUTOMATION AGENT")
+#     print("=" * 60)
+    
+#     goal = input("\n🎯 What would you like to do? ").strip()
+    
+#     if goal:
+#         result = agent.run(goal, max_steps=15)
+        
+#         print("\n" + "=" * 60)
+#         print("📋 FINAL RESULT:")
+#         print("=" * 60)
+#         print(f"Status: {result['status']}")
+        
+#         if result.get('handoff'):
+#             print("\n🔄 HANDOFF INFO:")
+#             print(f"   Next action: {result['handoff']['action']}")
+#             print(f"   Params: {result['handoff']['params']}")
+#             print(f"   Description: {result['handoff']['reasoning']}")
+#             print(f"\n   → Pass this to your grounding system")
+        
+#         print("\n📋 ACTION HISTORY:")
+#         print("=" * 60)
+#         for i, h in enumerate(result['history'], 1):
+#             status_icon = "✅" if h['status'] == 'success' else ("🔄" if h['status'] == 'handoff' else "❌")
+#             print(f"{i}. {status_icon} {h['action']}({h.get('params', {})})")
