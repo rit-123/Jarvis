@@ -203,6 +203,139 @@ Based on the current screenshot, what is the NEXT action to take?"""
             print(f"Response: {response_text}")
             raise
     
+    def _find_click_position(self, target_description: str, max_attempts: int = 5) -> tuple:
+        """
+        Iteratively find the right position to click using visual feedback.
+        
+        Args:
+            target_description: What to click (e.g., "the like button")
+            max_attempts: Maximum refinement attempts
+            
+        Returns:
+            (x, y) coordinates
+        """
+        print(f"🎯 Finding position for: {target_description}")
+        
+        current_x, current_y = None, None
+        
+        for attempt in range(1, max_attempts + 1):
+            print(f"   Attempt {attempt}/{max_attempts}...")
+            
+            # Take screenshot
+            screenshot_b64 = self._screenshot_to_base64()
+            
+            # Ask Claude for coordinates
+            if attempt == 1:
+                prompt = f"""Look at the screenshot and find: {target_description}
+
+Provide the X and Y coordinates for the CENTER of this element.
+
+IMPORTANT: Aim for the dead center of the element, not the edge.
+
+Respond ONLY with JSON:
+{{
+  "x": <number>,
+  "y": <number>,
+  "reasoning": "why these coordinates point to the center"
+}}"""
+            else:
+                prompt = f"""The cursor is currently visible in the screenshot at position ({current_x}, {current_y}).
+
+Target: {target_description}
+
+CRITICAL INSTRUCTIONS:
+1. Check if the cursor is CENTERED on the target element
+2. If not centered, provide NEW coordinates that are at least 10-20 pixels different
+3. Aim for the DEAD CENTER of the element, not edges or corners
+4. Make BOLD adjustments if you're off
+
+Respond ONLY with JSON:
+{{
+  "on_target": true/false,
+  "x": <number or null>,
+  "y": <number or null>,
+  "reasoning": "detailed explanation of cursor position relative to target"
+}}
+
+If the cursor is NOT on target, you MUST provide new x,y coordinates that differ by at least 10 pixels."""
+            
+            response = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=300,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": screenshot_b64
+                                }
+                            }
+                        ]
+                    }
+                ]
+            )
+            
+            # Parse response
+            response_text = response.content[0].text.strip()
+            import re
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                response_text = json_match.group(0)
+            
+            try:
+                result = json.loads(response_text)
+            except:
+                print(f"   ❌ Could not parse response")
+                continue
+            
+            # First attempt - just get coordinates
+            if attempt == 1:
+                x, y = result['x'], result['y']
+                current_x, current_y = x, y
+                print(f"   Initial guess: ({x}, {y}) - {result.get('reasoning', '')}")
+                
+                # Move cursor there
+                pyautogui.moveTo(x, y, duration=0.3)
+                import time
+                time.sleep(0.5)
+                
+            # Subsequent attempts - check if on target
+            else:
+                if result.get('on_target'):
+                    print(f"   ✅ Cursor is centered on target!")
+                    return current_x, current_y
+                
+                if result.get('x') is not None and result.get('y') is not None:
+                    new_x, new_y = result['x'], result['y']
+                    
+                    # Enforce minimum movement of 10 pixels
+                    if current_x is not None and current_y is not None:
+                        distance = ((new_x - current_x)**2 + (new_y - current_y)**2)**0.5
+                        
+                        if distance < 10:
+                            print(f"   ⚠️  Movement too small ({distance:.1f}px), encouraging larger adjustment...")
+                            # Ask again with stronger language
+                            continue
+                    
+                    current_x, current_y = new_x, new_y
+                    print(f"   Adjusting to: ({new_x}, {new_y}) - {result.get('reasoning', '')}")
+                    
+                    pyautogui.moveTo(new_x, new_y, duration=0.3)
+                    import time
+                    time.sleep(0.5)
+                else:
+                    print(f"   ⚠️  No new coordinates provided")
+        
+        # Return final position
+        final_x, final_y = current_x or pyautogui.position()[0], current_y or pyautogui.position()[1]
+        print(f"   Using final position: ({final_x}, {final_y})")
+        return final_x, final_y
+    
     def execute_action(self, action_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute a single action.
@@ -230,6 +363,33 @@ Based on the current screenshot, what is the NEXT action to take?"""
             }
         
         try:
+            # Special handling for click and move_mouse - use iterative positioning
+            if action_name == "click" and params.get('x') is not None and params.get('y') is not None:
+                print(f"   🔍 Using iterative cursor placement...")
+                
+                # Extract target description from reasoning or use generic
+                target = reasoning if reasoning else "the target element"
+                
+                # Find the right position iteratively
+                x, y = self._find_click_position(target, max_attempts=4)
+                
+                # Update params with refined coordinates
+                params['x'] = x
+                params['y'] = y
+                
+            elif action_name == "move_mouse":
+                print(f"   🔍 Using iterative cursor placement...")
+                
+                # Extract target description
+                target = reasoning if reasoning else "the target position"
+                
+                # Find position
+                x, y = self._find_click_position(target, max_attempts=4)
+                
+                # Update params
+                params['x'] = x
+                params['y'] = y
+            
             # Get the action method
             if not hasattr(self.actions, action_name):
                 raise ValueError(f"Unknown action: {action_name}")
