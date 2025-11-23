@@ -557,9 +557,10 @@ def run_agent(instruction: str, anthropic_api_key: str = None) -> Dict[str, Any]
     
     return result
 
-res = run_agent("go to chrome, go to youtube and search up videos of uw madison")
-print(res)
-# if __name__ == "__main__":
+# res = run_agent("open chrome")
+# print(res, "is the result")
+
+# # if __name__ == "__main__":
 #     import os
     
 #     # Get API keys
